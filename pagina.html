@@ -1,0 +1,284 @@
+
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <title>Cloud Computing and Virtualization Course</title>
+  <style>
+    body {
+      font-family: 'Open Sans', serif;
+      font-size: 12px;
+    }
+    .center {
+      margin: auto;
+      width: 80%;
+      border: 3px solid transparent;
+      padding: 10px;
+    }
+    .ist-logo {
+      position: absolute;
+      top: 5px;
+    }
+    h1, h2 {
+      text-align: center;
+    }
+
+    .grid-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      grid-gap: 20px;
+    }
+
+    /* Fractals */
+    .fractal-output {
+      width: 100%;
+      min-height: 200px;
+      border: 1px solid #ccc;
+      background-color: #f9f9f9;
+      display: block;
+      margin-bottom: 10px;
+    }
+
+    /* Placeholder */
+    .placeholder-output {
+      width: 80%;
+      aspect-ratio: 1 / 1.2;
+      border: 1px dashed #ccc;
+      padding: 10px;
+      font-family: Monospaced, monospace;
+      white-space: pre-wrap;
+      color: #777;
+    }
+
+    .dna-output {
+      width: 100%;
+      min-height: 280px;
+      border: 1px solid #ccc;
+      background-color: #fff;
+      display: block;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="main-block" class="center">   <!-- Parent container for all content -->
+    <div>
+      <a href="https://fenix.tecnico.ulisboa.pt/disciplinas/AVExe23610/2025-2026/2-semestre" target="_blank"><h1>Cloud Computing and Virtualization Course - 2025/26</h1></a>
+      <h2>Nature@Cloud</h2>
+       <a href="https://dei.tecnico.ulisboa.pt/" target="_blank"><img border="0" src="logodei.gif" width="144"></a>
+
+    </div>
+    <div id="process" class="center">   <!-- Parent container for all inputs -->
+
+      <p>Remote web server address:</p>
+      <input id="targetAddress" required="required" type="string" value="127.0.0.1"><br>
+      <p>Remote web server port:</p>
+      <input id="targetPort" required="required" type="integer" value="8000"><br>
+
+      <div class="grid-container">   <!-- Parent container for columns -->
+
+
+        <!------------------------------------------Fractals------------------------------------------>
+        <div class="grid-child">   <!-- Container for the left column (Fractals) -->
+          <h2>Julia Fractals</h2>
+
+          <p>Output:</p>
+          <img id="fractalImageOutput" class="fractal-output" alt="Generated Fractal will appear here"/>
+
+          <p>Width (w):</p>
+          <input id="fractalWidth" required="required" type="number" min="10" value="800"><br>
+
+          <p>Height (h):</p>
+          <input id="fractalHeight" required="required" type="number" min="10" value="600"><br>
+
+          <p>Max Iterations:</p>
+          <input id="fractalIterations" required="required" type="number" min="1" max="1000" value="100"><br>
+
+          <br><br>
+          <button id="executeFractalButton" onclick="executeFractal(this)">Generate Fractal</button>
+          <br><br>
+        </div>
+
+
+        <!------------------------------------------Gray-Scott------------------------------------------>
+        <div class="grid-child">   <!-- Container for Gray-Scott -->
+          <h2>Gray-Scott</h2>
+
+          <p>Output:</p>
+          <img id="grayScottImageOutput" class="fractal-output" alt="Generated Gray-Scott image will appear here"/>
+
+          <p>Size:</p>
+          <input id="grayScottSize" required="required" type="number" min="16" value="256"><br>
+
+          <p>Max Iterations:</p>
+          <input id="grayScottIterations" required="required" type="number" min="1" value="5000"><br>
+
+          <p>Feed F:</p>
+          <input id="grayScottF" required="required" type="number" step="0.001" value="0.030"><br>
+
+          <p>Kill K:</p>
+          <input id="grayScottK" required="required" type="number" step="0.001" value="0.062"><br>
+
+          <p>Stop On Extinction:</p>
+          <select id="grayScottStopOnExtinction">
+            <option value="false" selected="selected">false</option>
+            <option value="true">true</option>
+          </select><br>
+
+          <p>Seed Mode:</p>
+          <select id="grayScottSeedMode">
+            <option value="center" selected="selected">center</option>
+            <option value="ring">ring</option>
+            <option value="stripe">stripe</option>
+          </select><br>
+
+          <br><br>
+          <button id="executeGrayScottButton" onclick="executeGrayScott(this)">Generate Gray-Scott</button>
+          <br><br>
+        </div>
+
+
+        <!------------------------------------------DNA------------------------------------------>
+        <div class="grid-child">   <!-- Container for DNA -->
+          <h2>DNA Alignment</h2>
+
+          <p>Output:</p>
+          <iframe id="dnaHtmlOutput" class="dna-output" title="DNA alignment result"></iframe>
+
+          <p>Sequence 1 ([name:]FASTA):</p>
+          <textarea id="dnaSeq1" rows="5" style="width: 100%;">human_HBB:>lcl|NC_000011.10_cds_NP_000509.1_1 [gene=HBB] [db_xref=CCDS:CCDS7753.1,GeneID:3043] [protein=hemoglobin subunit beta] [protein_id=NP_000509.1] [location=complement(join(5225598..5225726,5226577..5226799,5226930..5227021))] [gbkey=CDS]
+ATGGTGCATCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTCCTTTGGGGATCTGTCCACTCCTGATGCTGTTATGGGCAACCCTAAGGTGAAGGCTCATGGCAAGAAAGTGCTCGGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAGGGCACCTTTGCCACACTGAGTGAGCTGCACTGTGACAAGCTGCACGTGGATCCTGAGAACTTCAGGCTCCTGGGCAACGTGCTGGTCTGTGTGCTGGCCCATCACTTTGGCAAAGAATTCACCCCACCAGTGCAGGCTGCCTATCAGAAAGTGGTGGCTGGTGTGGCTAATGCCCTGGCCCACAAGTATCACTAA</textarea>
+
+          <p>Sequence 2 ([name:]FASTA):</p>
+          <textarea id="dnaSeq2" rows="5" style="width: 100%;">chimpanzee_HBB:>lcl|NC_036890.1_cds_XP_508242.1_1 [gene=HBB] [db_xref=GeneID:450978] [protein=hemoglobin subunit beta] [protein_id=XP_508242.1] [location=complement(join(5086135..5086263,5087114..5087336,5087467..5087558))] [gbkey=CDS]
+ATGGTGCACCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTCCTTTGGGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAGGGCACCTTTGCCACACTGAGTGAGCTGCACTGTGACAAGCTGCACGTGGATCCTGAGAACTTCAGGCTCCTGGGCAACGTGCTGGTCTGTGTGCTGGCCCATCACTTTGGCAAAGAATTCACCCCACCAGTGCAGGCTGCCTATCAGAAAGTGGTGGCTGGTGTGGCTAATGCCCTGGCCCACAAGTATCACTAA</textarea>
+
+          <p>Minimum Match Length:</p>
+          <input id="dnaMinLength" required="required" type="number" min="1" value="3"><br>
+
+          <p>Stop On First Match:</p>
+          <select id="dnaStopOnFirst">
+            <option value="false" selected="selected">false</option>
+            <option value="true">true</option>
+          </select><br>
+
+          <br><br>
+          <button id="executeDnaButton" onclick="executeDna(this)">Run DNA Alignment</button>
+          <br><br>
+        </div>
+      </div>
+
+    </div>
+  <small> </small>
+  </div>
+  <script>
+    // ---------------------Julia Fractals---------------------
+    function executeFractal(e) {
+      // Get server data.
+      const host = document.getElementById("targetAddress").value;
+      const port = document.getElementById("targetPort").value;
+
+      // Read inputs.
+      const w = document.getElementById("fractalWidth").value;
+      const h = document.getElementById("fractalHeight").value;
+      const iterations = document.getElementById("fractalIterations").value;
+
+      const queryParameters = `?w=${w}&h=${h}&iterations=${iterations}`;
+
+      fetch(`http://${host}:${port}/fractals${queryParameters}`, { method: 'GET' })
+        .then(response => response.text()) // Expecting the "data:image/png;base64,..." string.
+        .then(data => {
+          if (data.startsWith("{")) {
+              // If it starts with '{', it's likely JSON error response.
+              const err = JSON.parse(data);
+              alert("Error: " + err.error);
+          } else {
+              document.getElementById("fractalImageOutput").src = data;
+          }
+        }).catch(error => alert(error.message));
+    }
+
+    // ---------------------Gray-Scott---------------------
+    function executeGrayScott(e) {
+      // Get server data.
+      const host = document.getElementById("targetAddress").value;
+      const port = document.getElementById("targetPort").value;
+
+      // Read inputs.
+      const size = document.getElementById("grayScottSize").value;
+      const maxIterations = document.getElementById("grayScottIterations").value;
+      const f = document.getElementById("grayScottF").value;
+      const k = document.getElementById("grayScottK").value;
+      const stopOnExtinction = document.getElementById("grayScottStopOnExtinction").value;
+      const seedMode = document.getElementById("grayScottSeedMode").value;
+
+      const queryParameters = `?size=${size}&maxIterations=${maxIterations}&f=${f}&k=${k}&stopOnExtinction=${stopOnExtinction}&seedMode=${seedMode}`;
+
+      fetch(`http://${host}:${port}/grayscott${queryParameters}`, { method: 'GET' })
+        .then(response => response.text())
+        .then(data => {
+          if (data.startsWith("{")) {
+            const err = JSON.parse(data);
+            alert("Error: " + err.error);
+          } else {
+            document.getElementById("grayScottImageOutput").src = data;
+          }
+        }).catch(error => alert(error.message));
+    }
+
+    // ---------------------DNA Alignment---------------------
+    function executeDna(e) {
+      // Get server data.
+      const host = document.getElementById("targetAddress").value;
+      const port = document.getElementById("targetPort").value;
+
+      // Read inputs.
+      const seq1 = document.getElementById("dnaSeq1").value;
+      const seq2 = document.getElementById("dnaSeq2").value;
+      const minLength = document.getElementById("dnaMinLength").value;
+      const stopOnFirst = document.getElementById("dnaStopOnFirst").value;
+
+      const queryParameters =
+        `?seq1=${encodeURIComponent(seq1)}` +
+        `&seq2=${encodeURIComponent(seq2)}` +
+        `&minLength=${minLength}` +
+        `&stopOnFirst=${stopOnFirst}`;
+
+      fetch(`http://${host}:${port}/dna${queryParameters}`, { method: 'GET' })
+        .then(response => response.text())
+        .then(data => {
+          if (data.startsWith("{")) {
+            const err = JSON.parse(data);
+            alert("Error: " + err.error);
+          } else {
+            document.getElementById("dnaHtmlOutput").srcdoc = data;
+          }
+        }).catch(error => alert(error.message));
+    }
+    // ---------------------Capture the Flag---------------------
+    function executeCaptureTheFlag(e) {
+      // Get server data.
+      const host = document.getElementById("targetAddress").value;
+      const port = document.getElementById("targetPort").value;
+
+      // Read inputs.
+      const gridSize = document.getElementById("gridSize").value;
+      const numBlueAgents = document.getElementById("numBlueAgents").value;
+      const numRedAgents = document.getElementById("numRedAgents").value;
+      const flagPlacementType = document.getElementById("flagPlacementType").value;
+
+      const queryParameters = `?gridSize=${gridSize}&numBlueAgents=${numBlueAgents}&numRedAgents=${numRedAgents}&flagPlacementType=${flagPlacementType}`;
+
+      fetch(`http://${host}:${port}/capturetheflag${queryParameters}`, { method: 'GET' })
+              .then(response => response.text())
+              .then(data => {
+                // const highlightedText = data.replace(/r/g, '<span class="red-text">r</span>')
+                //                             .replace(/r/g, '<span class="blue-text">b</span>');
+                document.getElementById("captureTheFlagOutput").innerHTML = data;
+              }).catch(error => alert(error.message));
+    }
+  </script>
+
+
+</body></html>

@@ -1,0 +1,27 @@
+.idea
+.vscode
+*.iml
+**/target/
+
+# --- AWS / segurança ---
+# Chaves SSH descarregadas pelos scripts (NUNCA commitar)
+*.pem
+*.ppk
+
+# Credenciais AWS locais (caso alguém ponha por engano dentro do repo)
+.aws/
+credentials
+credentials.csv
+*.aws-credentials
+
+# Estado/output dos scripts de provisionamento
+scripts/.state/
+scripts/*.local.ps1
+
+# Logs e artefactos temporários
+*.log
+*.tmp
+
+# OS
+Thumbs.db
+.DS_Store
