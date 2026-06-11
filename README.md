@@ -1,4 +1,4 @@
-# bytecode-driven-cloud-autoscaler
+# Bytecode Driven Cloud Autoscaler
 
 An elastic AWS platform for compute-intensive workloads. The system uses Javassist bytecode instrumentation to count dynamic CPU instructions per request, stores those metrics in DynamoDB, and feeds them into a custom Java Load Balancer and Auto-Scaler that route and scale work based on projected cost, not wall-clock time.
 
