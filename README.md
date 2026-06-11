@@ -1,72 +1,288 @@
-# Nature@Cloud
+# bytecode-driven-cloud-autoscaler
 
-> **CNV 2025/26** — Cloud Computing and Virtualization @ IST
->
-> Custom AWS elastic platform for Nature@Cloud workloads: Julia fractals, Gray-Scott reaction-diffusion, and DNA matching. The system uses Javassist bytecode instrumentation, DynamoDB-backed metrics, complexity-aware load balancing, Lambda fallback/overflow, and a custom EC2 AutoScaler.
+An elastic AWS platform for compute-intensive workloads. The system uses Javassist bytecode instrumentation to count dynamic CPU instructions per request, stores those metrics in DynamoDB, and feeds them into a custom Java Load Balancer and Auto-Scaler that route and scale work based on projected cost, not wall-clock time.
 
-## Current Architecture
+---
 
-```text
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Workloads](#workloads)
+- [Core Systems](#core-systems)
+- [Tech Stack](#tech-stack)
+- [Installation](#installation)
+- [Running Locally](#running-locally)
+- [AWS Deployment](#aws-deployment)
+- [Benchmark and Evidence Scripts](#benchmark-and-evidence-scripts)
+- [Project Structure](#project-structure)
+
+---
+
+## Overview
+
+Raw execution time is an unreliable scheduling signal under concurrent execution: contention, JIT warm-up, and EC2 burst credit depletion all distort it. This system replaces wall-clock time with estimated work, a composite metric derived from dynamic bytecode instruction counts (ICount) and heap allocation, extracted via a Javassist Java agent at class-load time.
+
+Estimated work is the shared control variable across all components:
+
+- The Javassist agent produces per-request ICount and memory metrics on EC2 workers.
+- DynamoDB stores those metrics as a historical record per request.
+- The ComplexityEstimator converts request parameters and history into a composite cost estimate before dispatch.
+- The Load Balancer routes each request by projected worker load and Lambda eligibility.
+- The Auto-Scaler scales EC2 capacity using percentage thresholds over calibrated worker capacity.
+
+The result is a cost-aware, explainable scheduling system that packs work to enable scale-down, spreads under saturation, and reserves Lambda for small overflow requests only.
+
+---
+
+## Architecture
+
+```
 Client / browser / curl
-        │
-        ▼
-Load Balancer + AutoScaler on EC2, port 8080
-        │
-        ├── ComplexityEstimator
-        │      ├── DynamoDB history cache, 30s TTL
-        │      └── calibrated heuristic fallback
-        │
-        ├── EC2 WorkerPool, port 8000
-        │      ├── Java WebServer + CachedThreadPool
-        │      ├── Javassist javaagent
-        │      └── buffered metric writes to DynamoDB
-        │
-        ├── AWS Lambda workers for small overflow/fallback requests
-        │      ├── cnv-fractals
-        │      ├── cnv-grayscott
-        │      └── cnv-dna
-        │
-        └── AWS EC2 API for worker launch/termination
-
-DynamoDB MSS: cnv-metrics
+        |
+        v
++----------------------------------------------+
+|        Load Balancer + AutoScaler  (EC2)      |
+|                                              |
+|  +---------------------------------------+   |
+|  |         ComplexityEstimator           |   |
+|  |  +-- DynamoDB history (30s cache)     |   |
+|  |  +-- calibrated heuristic fallback    |   |
+|  +---------------------------------------+   |
+|                                              |
+|  Routing decision                            |
+|  +-- EC2 WorkerPool (hybrid packing/spread)  |
+|  +-- AWS Lambda (small overflow / fallback)  |
++------------------+---------------------------+
+                   |
+       +-----------+-----------+
+       |                       |
++------v------+         +------v------+
+|  EC2 Worker |   ...   |  EC2 Worker |   (1-5 instances, t3.micro)
+|             |         |             |
+|  WebServer  |         |  WebServer  |
+|  + Javassist|         |  + Javassist|
+|    Agent    |         |    Agent    |
++------+------+         +------+------+
+       +-----------+-----------+
+                   | async batch writes
+                   v
+            +-------------+
+            |   DynamoDB   |
+            |  cnv-metrics |
+            +-------------+
 ```
 
-| Component | Description |
-|---|---|
-| `webserver` | HTTP server exposing `/fractals`, `/grayscott`, `/dna`, and `/` health endpoint |
-| `fractals` | Julia-set fractal image generation |
-| `grayscott` | Gray-Scott reaction-diffusion simulation |
-| `dna` | FASTA/DNA sequence matcher with HTML output |
-| `javassist` | Java agent collecting `instructionCount`, `allocatedBytes`, `methodCallCount`, and `elapsedTimeMs` |
-| `loadbalancer` | Custom Java LB + AutoScaler + ComplexityEstimator + LambdaInvoker |
-| `scripts` | AWS provisioning, Lambda deployment, benchmark, and cleanup scripts |
-| `docs` | Calibration evidence, runbooks, design notes, and validation reports |
-| `report` | LaTeX report sources |
+Request flow:
 
-## Prerequisites
+```
+1. Client sends request to the Load Balancer
+2. ComplexityEstimator computes composite cost C from parameters + DynamoDB history
+3. If request is small (C <= 1x10^10) and all workers >= 80% capacity, route to Lambda
+4. Otherwise, select EC2 worker via hybrid packing/spreading policy
+5. Worker executes with Javassist agent active; metrics accumulate in ThreadLocal registry
+6. On completion, metrics are buffered and flushed to DynamoDB in batches every 15s
+7. AutoScaler reads in-flight work counters every 5s and scales EC2 pool accordingly
+```
+
+---
+
+## Workloads
+
+The platform serves three parameterized, CPU-intensive endpoints:
+
+| Endpoint | Parameters | Output | Complexity profile |
+|---|---|---|---|
+| `GET /fractals` | `w`, `h`, `iterations` | PNG (data URI) | Linear in `w x h`; saturates at 500 iterations |
+| `GET /grayscott` | `size`, `maxIterations`, `f`, `k`, `seedMode` | PNG (data URI) | ~164 instructions per cell per iteration; highly predictable |
+| `GET /dna` | `seq1`, `seq2`, `minLength`, `stopOnFirst` | HTML report | Linear in `max(len(seq1), len(seq2))` |
+
+Complexity spans several orders of magnitude: a small DNA request finishes in milliseconds, while a heavy Gray-Scott simulation can exceed 48 billion bytecode instructions.
+
+---
+
+## Core Systems
+
+### 1. Bytecode Instrumentation (Javassist Agent)
+
+The Java agent instruments only the three workload packages at class-load time, leaving the HTTP server, AWS SDK, and JDK uninstrumented.
+
+For each target class, the agent performs three injections.
+
+Request lifecycle hooks, injected into the `handle(HttpExchange)` method of each workload handler:
+```java
+MetricRegistry.startRequest(exchange.getRequestURI().toString()); // entry
+MetricRegistry.stopRequest();                                      // exit (finally block)
+```
+
+ICount basic-block instruction counting: for every method of every target class, the agent uses `ControlFlow.basicBlocks()` to extract basic blocks and injects at the start of each block:
+```java
+MetricRegistry.incrementInstructions(N); // N = bytecode instructions in this block
+```
+Because the call runs every time the block is visited, loops are counted dynamically. This gives a precise, contention-free CPU work signal independent of wall-clock variability.
+
+Method call counting as a diagnostic cross-check:
+```java
+MetricRegistry.incrementMethodCalls();
+```
+
+Per-request isolation uses `ThreadLocal<RequestMetrics>`. For RAM, `ThreadMXBean.getThreadAllocatedBytes()` measures the net heap delta between request entry and exit, a zero-overhead JVM-native hook requiring no bytecode injection.
+
+---
+
+### 2. Composite Work Metric
+
+Scheduling uses a composite cost combining CPU and memory:
+
+```
+C = W_cpu x instructionCount + W_ram x allocatedBytes
+```
+
+Defaults: `W_cpu = W_ram = 1.0`, configurable via `-Dcnv.estwork.wcpu` and `-Dcnv.estwork.wram`. ICount dominates for CPU-bound fractals and Gray-Scott. RAM adds an independent dimension useful for DNA requests, which can allocate significant heap despite modest instruction counts.
+
+Calibration evidence:
+
+| Workload | CPU profile | RAM profile |
+|---|---|---|
+| Fractals | Linear in `w x h`; iteration count saturates at 500 (Julia-set escape) | ~33 bytes/pixel |
+| Gray-Scott | Constant ~164 instr/cell/iteration across all parameter combinations | ~64 bytes/cell |
+| DNA | ~123-149 instr/char of max sequence length | ~800 bytes/char |
+
+---
+
+### 3. Complexity Estimation
+
+Before routing, the LB estimates each request's composite cost via two modes:
+
+1. History mode: queries up to 50 recent DynamoDB records for the same workload type, cached locally for 30 seconds, and estimates from historical `metric / feature` ratios via linear regression.
+2. Heuristic fallback: used when DynamoDB is unavailable or contains insufficient records.
+
+Heuristic formulas:
+
+| Workload | CPU heuristic |
+|---|---|
+| Fractals | `w x h x min(iterations, 500) x multiplier` (multiplier: 10 / 5 / 2 by iteration regime) |
+| Gray-Scott | `size^2 x maxIterations x 164` |
+| DNA | content-aware seed scan cost + `60 x (len(seq1) + len(seq2))` |
+
+For DNA, a content-aware seed feature builds a `HashSet` of `minLength`-seeds from `seq2` and estimates match density in `seq1`, capturing the large cost difference between requests with many matches versus absent seeds without executing the full aligner.
+
+---
+
+### 4. Load Balancing: Hybrid Packing and Spreading
+
+The LB selects workers using a two-regime policy:
+
+```
+Packing regime (under-capacity)
+  -> Choose the most-loaded worker whose projected load stays below MAXCAP
+  -> Consolidates work onto fewer VMs; leaves others idle for Auto-Scaler termination
+
+Spreading regime (over-capacity fallback)
+  -> Choose the least-loaded worker
+  -> Prevents queue spikes under saturation; signals Auto-Scaler to provision more capacity
+```
+
+`MAXCAP` is calibrated to one heavy Gray-Scott request (~25s of continuous execution on a `t3.micro`).
+
+Lambda functions act as a pressure valve, not the primary path. A request is Lambda-eligible if `C <= 1x10^10` (20% of `MAXCAP`, approximately 5s of execution). The LB routes to Lambda in two cases:
+
+- Fast-path: request is small and all EC2 workers are at or above 80% capacity.
+- Fallback: small request fails all EC2 retry attempts.
+
+Large requests (`C > 1x10^10`) are always EC2-only.
+
+Fault tolerance at request level: 10s connection timeout and 120s HTTP request timeout. On failure, retries up to `min(3, |pool|)` times on other workers using an exclusion list. Final fallback to Lambda for eligible requests; otherwise returns `502 Bad Gateway`.
+
+---
+
+### 5. Auto-Scaler
+
+The AS runs inside the LB process, polling every 5 seconds:
+
+```
+avgCapacity (%) = 100 x sum(L(w)) / (|W| x MAXCAP)
+```
+
+| Event | Threshold | Action |
+|---|---|---|
+| Scale-up | avgCapacity > 80% and pool size < 5 | Launch 1 EC2 worker |
+| Scale-down | avgCapacity < 20% and pool size > 1 | Drain and terminate 1 EC2 worker |
+
+The 4x hysteresis band (80% / 20%) avoids oscillation. Each action changes pool size by exactly 1 worker. Scale-down is drain-first: the target worker is removed from the selection pool, its active request counter is polled every 2 seconds for up to 30 seconds, and the EC2 instance is terminated only when fully drained. If requests remain after the drain window, termination is deferred and the worker is re-added.
+
+Health checks run every 15 seconds, probing each worker's `/` endpoint with a 2s timeout. A worker is evicted only after 3 consecutive failures (30-45s detection window), which filters transient GC pauses and JIT spikes. On eviction, the AS terminates the corresponding EC2 instance via the AWS SDK to prevent orphaned paid resources. If the pool drops below the minimum, a replacement worker is launched automatically.
+
+---
+
+### 6. Metrics Storage (DynamoDB)
+
+Table: `cnv-metrics`
+
+| Key | Type |
+|---|---|
+| Partition key | `requestType` |
+| Sort key | `requestId` (timestamp + short UUID) |
+
+Stored fields: `instructionCount`, `allocatedBytes`, `methodCallCount`, `elapsedTimeMs`, `timestamp`, and all original query parameters under `param_*`. Billing: `PAY_PER_REQUEST`.
+
+Writes are buffered in memory and flushed as `BatchWriteItem` operations every 15 seconds in batches of up to 25 items, keeping DynamoDB off the critical request path. Workers degrade gracefully to heuristic-only estimation if DynamoDB is unavailable.
+
+Configurable flush properties:
+```bash
+-Dcnv.metrics.flush.interval.seconds=15
+-Dcnv.metrics.max.buffered.writes=10000
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Java 11 |
+| Build | Maven 3.9+ |
+| Bytecode instrumentation | Javassist |
+| Cloud provider | AWS (EC2, Lambda, DynamoDB, IAM) |
+| Worker instances | `t3.micro`, `eu-west-1` |
+| HTTP server | Java native `HttpServer` |
+| Metrics store | DynamoDB (`PAY_PER_REQUEST`) |
+| AWS SDK | AWS SDK for Java v2 |
+| Deployment | Bash scripts (IAM, SGs, AMI, EC2, Lambda) |
+
+---
+
+## Installation
+
+Prerequisites:
 
 - Java 11+
 - Maven 3.9+
-- AWS CLI configured with credentials, for cloud deployment
-- AWS permissions for EC2, IAM, DynamoDB, Lambda, and security groups
-- WSL/Linux shell for the deployment scripts
+- AWS CLI configured with credentials
+- AWS permissions: EC2, IAM, DynamoDB, Lambda, security groups
+- WSL or Linux shell for the deployment scripts
 
-## Quick Start: Local Worker
-
-Build all modules:
+Build:
 
 ```bash
+git clone https://github.com/laurarodrigues3/bytecode-driven-cloud-autoscaler.git
+cd bytecode-driven-cloud-autoscaler
+
 mvn clean package -DskipTests
 ```
 
-Run the webserver without instrumentation:
+---
+
+## Running Locally
+
+Worker without instrumentation:
 
 ```bash
 java -cp webserver/target/webserver-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
     pt.ulisboa.tecnico.cnv.webserver.WebServer 8000
 ```
 
-Run the webserver with Javassist instrumentation:
+Worker with Javassist instrumentation:
 
 ```bash
 java -javaagent:javassist/target/javassist-agent-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
@@ -79,19 +295,17 @@ The worker listens on `http://localhost:8000`.
 Example requests:
 
 ```bash
-# Fractals — returns a data:image/png;base64,... string
+# Fractals - returns PNG as data URI
 curl "http://localhost:8000/fractals?w=400&h=400&iterations=100"
 
-# Gray-Scott — returns a data:image/png;base64,... string
+# Gray-Scott - returns PNG as data URI
 curl "http://localhost:8000/grayscott?size=128&maxIterations=500&f=0.030&k=0.062&stopOnExtinction=false&seedMode=center"
 
-# DNA — returns an HTML report
+# DNA - returns HTML match report
 curl "http://localhost:8000/dna?seq1=seq1:ATGCATGCATGC&seq2=seq2:ATGCATGCATGC&minLength=3&stopOnFirst=false"
 ```
 
-## Quick Start: Local Load Balancer
-
-Start one or more local workers on different ports, then launch the LB with their addresses:
+Load Balancer in local mode. Start one or more workers on different ports, then launch the LB pointing at them:
 
 ```bash
 java -cp loadbalancer/target/loadbalancer-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
@@ -99,11 +313,13 @@ java -cp loadbalancer/target/loadbalancer-1.0.0-SNAPSHOT-jar-with-dependencies.j
     8080 localhost:8000
 ```
 
-The LB listens on `http://localhost:8080` and forwards only workload paths. The root endpoint shows the current worker pool.
+The LB listens on `http://localhost:8080`. The root endpoint (`/`) displays the current worker pool state.
+
+---
 
 ## AWS Deployment
 
-All scripts live in `scripts/` and should be run from WSL/Linux. A typical deployment is:
+All scripts live in `scripts/` and must be run from WSL/Linux in order:
 
 ```bash
 cd scripts
@@ -117,7 +333,7 @@ echo "YES" | ./99-cleanup.sh --deep
 # 2. Create key pair, security groups, and network rules
 ./02-setup-network.sh
 
-# 3. Build worker AMI with Java + JARs + systemd service
+# 3. Build worker AMI (Java + JARs + systemd service)
 ./03-create-ami.sh
 
 # 4. Launch initial worker
@@ -126,269 +342,63 @@ echo "YES" | ./99-cleanup.sh --deep
 # 5. Launch Load Balancer / AutoScaler EC2
 ./05-launch-lb.sh $(cat .state/worker-instance-ids.txt)
 
-# 6. Deploy/update Lambda workers
+# 6. Deploy Lambda workers
 ./06-deploy-lambdas.sh
 ```
 
-After deployment, the LB status page is available at:
+The LB status page is available at `http://<LB_PUBLIC_IP>:8080/`.
 
-```text
-http://<LB_PUBLIC_IP>:8080/
-```
-
-### Cleanup
+Cleanup:
 
 ```bash
-# Terminate project EC2 instances only
+# Terminate EC2 instances only
 ./99-cleanup.sh
 
-# Full teardown: EC2, SGs, key pair, IAM roles, AMI, Lambdas, DynamoDB, etc.
+# Full teardown: EC2, SGs, key pair, IAM, AMI, Lambdas, DynamoDB
 echo "YES" | ./99-cleanup.sh --deep
 ```
 
-## How It Works
-
-### Instrumentation and Metrics
-
-EC2 workers run with the Javassist Java agent. The agent instruments only workload packages:
-
-- `pt.ulisboa.tecnico.cnv.fractals`
-- `pt.ulisboa.tecnico.cnv.grayscott`
-- `pt.ulisboa.tecnico.cnv.dna`
-
-The primary CPU metric is `instructionCount`. The agent uses real basic blocks from Javassist `ControlFlow.basicBlocks()` and injects:
-
-```java
-MetricRegistry.incrementInstructions(N)
-```
-
-where `N` is the number of bytecode instructions in that block. Since the injected call runs every time the block is visited, loops are counted dynamically.
-
-Collected metrics:
-
-| Metric | Purpose |
-|---|---|
-| `instructionCount` | Primary CPU/work signal |
-| `allocatedBytes` | Memory pressure via `ThreadMXBean.getThreadAllocatedBytes()` |
-| `methodCallCount` | Diagnostic/cross-check metric |
-| `elapsedTimeMs` | Validation/correlation only, not primary scheduling signal |
-
-Per-request isolation is done with `ThreadLocal<RequestMetrics>`.
-
-### Metrics Storage System: DynamoDB
-
-DynamoDB table:
-
-```text
-cnv-metrics
-```
-
-Primary key:
-
-| Key | Value |
-|---|---|
-| Partition key | `requestType` |
-| Sort key | `requestId` = timestamp + short UUID |
-
-Stored fields:
-
-| Field | Type | Description |
-|---|---|---|
-| `requestId` | String | Unique item id |
-| `requestType` | String | `fractals`, `grayscott`, or `dna` |
-| `instructionCount` | Number | Dynamic bytecode instructions |
-| `allocatedBytes` | Number | Bytes allocated by the request thread |
-| `methodCallCount` | Number | Method invocations |
-| `elapsedTimeMs` | Number | Wall-clock duration |
-| `timestamp` | Number | Completion timestamp |
-| `param_*` | String | Original request parameters |
-
-Writes are not sent one-by-one. Completed-request metrics are buffered in memory and flushed every 15 seconds using DynamoDB `BatchWriteItem` batches of up to 25 items.
-
-Configurable properties:
-
-```bash
--Dcnv.metrics.flush.interval.seconds=15
--Dcnv.metrics.max.buffered.writes=10000
-```
-
-This keeps request processing off the DynamoDB critical path and reduces SDK/HTTP overhead, while preserving one historical item per request for the estimator.
-
-### Complexity Estimation
-
-The LB estimates each request before routing it.
-
-1. **History mode:** query up to the 50 most recent DynamoDB records for the same `requestType`, cached locally for 30 seconds, and estimate from historical `metric / feature` ratios.
-2. **Heuristic fallback:** used when DynamoDB is unavailable, empty, or contains no valid records.
-
-Heuristic features:
-
-| Workload | CPU heuristic | RAM heuristic |
-|---|---|---|
-| Fractals | `w × h × min(iterations, 500) × multiplier`, where multiplier is `10`, `5`, or `2` by iteration regime | `w × h × 33` |
-| Gray-Scott | `size² × maxIterations × 164` | `size² × 64` |
-| DNA | `17 × seedPresenceScan + 60 × (len(seq1)+len(seq2))` | `52 × seedPresenceScan + 480 × (len(seq1)+len(seq2))` |
-
-For DNA, `seedPresenceScan` is a lightweight content-aware feature. The estimator builds a `HashSet` of `minLength`-seeds from `seq2`; for each seed in `seq1`, it adds a small cost if present in `seq2`, otherwise a full-scan cost. This captures the large difference between same-size DNA requests with many matches and requests with absent seeds, without executing the full matcher.
-
-Composite cost:
-
-```text
-compositeCost = W_CPU × instructionCount + W_RAM × allocatedBytes
-```
-
-Defaults:
-
-```bash
--Dcnv.estwork.wcpu=1.0
--Dcnv.estwork.wram=1.0
-```
-
-### Load Balancing
-
-The custom LB is the only public entry point. It estimates request cost, converts the estimate to seconds using calibrated `t3.micro` throughput, then decides where to send the request.
-
-Constants:
-
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `LAMBDA_MAX_SECONDS` | `5.0` | Maximum estimated seconds for Lambda eligibility |
-| `WORKER_LOAD_THRESHOLD` | `0.80` | Worker considered busy for Lambda fast-path |
-| `MAX_CAPACITY` | `5×10¹⁰` | 100% worker capacity / 25s calibrated work |
-| `WORKER_THROUGHPUT_INSTR_PER_MS` | `2.0×10⁶` | Calibrated `t3.micro` throughput |
-
-Configurable Lambda properties:
-
-```bash
--Dcnv.lambda.maxseconds=5.0
--Dcnv.lambda.loadthreshold=0.80
-```
-
-Routing policy:
-
-1. Estimate cost for `requestType + parameters`.
-2. If the request is Lambda-eligible (`estimatedSeconds ≤ 5`) and all EC2 workers are above 80% capacity, invoke Lambda directly.
-3. Otherwise, try EC2 first.
-4. EC2 worker selection uses **hybrid packing + spreading fallback**:
-   - choose the most-loaded worker that remains below `MAX_CAPACITY` after adding the request;
-   - if none fit, choose the least-loaded worker.
-5. On transport failure/timeout, retry on a different worker, up to 3 EC2 attempts.
-6. If all EC2 attempts fail and the request is Lambda-eligible, fallback to Lambda.
-7. Large requests (`estimatedSeconds > 5`) are EC2-only and are not sent to Lambda.
-
-Note: current retries are triggered by transport failures/timeouts. Application-level HTTP status codes returned by a worker are forwarded to the client.
-
-### AutoScaler
-
-The AutoScaler runs inside the LB process. It discovers existing workers by EC2 tags and can launch or terminate workers using the EC2 SDK.
-
-Scaling metric:
-
-```text
-avgCapacityPercent = 100 × totalEstimatedWork / (numWorkers × MAX_CAPACITY)
-```
-
-Defaults:
-
-| Parameter | Value | Meaning |
-|---|---:|---|
-| `MIN_WORKERS` | `1` | Minimum worker pool size |
-| `MAX_WORKERS` | `5` | Cost/quota cap |
-| Check interval | `5s` | Scaling loop interval |
-| Cooldown | `60s` | Minimum time between real scaling actions |
-| Scale-up | `80%` average capacity | About 20s of work per worker |
-| Scale-down | `20%` average capacity | About 5s of work per worker |
-| Drain wait | `15 × 2s = 30s` | Wait before terminating on scale-down |
-
-Configurable properties:
-
-```bash
--Dcnv.autoscaler.scaleup.percent=80.0
--Dcnv.autoscaler.scaledown.percent=20.0
-```
-
-Scale-down is drain-first: the chosen worker is removed from selection, the AS waits for active requests to finish, and the EC2 instance is terminated only when the worker is drained. If active requests remain after the drain window, termination is deferred and the worker is re-added.
-
-### Fault Tolerance
-
-Fault tolerance is layered:
-
-- **Request level:** forwarding failures, connection errors, and timeouts cause retry on another EC2 worker, excluding workers already tried for that request.
-- **Lambda fallback:** if EC2 retries fail, only Lambda-eligible requests are sent to Lambda. Large requests remain EC2-only.
-- **Worker health checks:** every 15 seconds, the pool probes each worker's `/` endpoint with a short timeout.
-- **Eviction:** a worker is removed only after 3 consecutive failed health checks, avoiding false positives during VM startup or transient pauses.
-- **EC2 cleanup:** when an AutoScaler-managed worker is evicted, the AutoScaler terminates the corresponding EC2 instance to avoid orphan resources.
-- **Graceful degradation:** no DynamoDB means heuristic estimation; no Lambda means EC2-only routing; no AWS config means local/log-only scaling mode.
+---
 
 ## Benchmark and Evidence Scripts
 
-Useful local scripts:
-
 ```bash
-# Original ICount calibration matrix
+# ICount calibration matrix
 bash scripts/test/_benchmark-icount.sh
 
 # Extended workload calibration
 bash scripts/test/_benchmark-extended.sh
 
-# DNA-specific feature benchmark
+# DNA seed feature benchmark
 python scripts/test/_benchmark-dna-features.py
 
-# Local smoke tests / AWS helpers
+# Smoke tests and scale/resilience validation
 bash scripts/test/_smoke-test.sh
 bash scripts/test/_test-scale.sh
 bash scripts/test/_test-resilience.sh
 ```
 
-Generated evidence is stored under `docs/`, including:
-
-- `docs/evidence-2026-05-21-calibration/`
-- `docs/evidence-dna-feature-benchmark/`
-- `docs/test-report-aws-2026-05-22.md`
+---
 
 ## Project Structure
 
-```text
-.
-├── pom.xml
-├── fractals/
-├── grayscott/
-├── dna/
-├── javassist/
-├── webserver/
-├── loadbalancer/
-├── scripts/
-│   ├── aws-config.sh
-│   ├── 01-setup-iam.sh
-│   ├── 02-setup-network.sh
-│   ├── 03-create-ami.sh
-│   ├── 04-launch-worker.sh
-│   ├── 05-launch-lb.sh
-│   ├── 06-deploy-lambdas.sh
-│   ├── 99-cleanup.sh
-│   └── test/
-├── docs/
-├── report/
-└── REPORT_SUPPORT/
 ```
-
-## Current Status
-
-Implemented and validated locally/build-wise:
-
-- EC2 worker webserver for all three workloads
-- Javassist ICount instrumentation
-- `allocatedBytes` memory metric
-- DynamoDB MSS with buffered batch writes
-- history-based + heuristic `ComplexityEstimator`
-- content-aware DNA seed feature
-- custom Java Load Balancer
-- Lambda fast-path and fallback for small requests
-- custom Java AutoScaler with 80%/20% capacity thresholds
-- worker health checks and EC2 eviction cleanup
-- AWS deployment and cleanup scripts
-- final report source in `report/final-report.tex`
-
-## Group
-
-CNV Group 35 — 2025/26
+.
++-- pom.xml
++-- fractals/             # Julia-set fractal generator
++-- grayscott/            # Gray-Scott reaction-diffusion simulation
++-- dna/                  # FASTA/DNA sequence aligner
++-- javassist/            # Bytecode instrumentation Java agent
++-- webserver/            # HTTP worker server
++-- loadbalancer/         # Load Balancer, AutoScaler, ComplexityEstimator
++-- scripts/
+|   +-- 01-setup-iam.sh
+|   +-- 02-setup-network.sh
+|   +-- 03-create-ami.sh
+|   +-- 04-launch-worker.sh
+|   +-- 05-launch-lb.sh
+|   +-- 06-deploy-lambdas.sh
+|   +-- 99-cleanup.sh
+|   +-- test/             # Calibration and validation scripts
++-- pagina.html           # Static HTML client for manual workload testing
+```
